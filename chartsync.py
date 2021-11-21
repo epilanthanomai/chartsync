@@ -63,46 +63,6 @@ class JsonCache:
 
 class Billboard:
     BASE_URL = "https://www.billboard.com/"
-    CHART_KEYS = [
-        "data-chart-code",
-        "data-chart-name",
-        "data-chart-date",
-        "data-chart-slug",
-    ]
-    POSITION_ARTIST_KEYS = [
-        # definitely interesting
-        "artist_name",
-        "artist_slug",
-        "artist_url",
-        # maybe interesting
-        "artist_id",
-        "artist_brightcove_id",
-        "artist_content_url",
-        "artist_vevo_id",
-    ]
-    POSITION_SONG_KEYS = [
-        # definitely interesting
-        "title",
-        # maybe interesting
-        "bdssongid",
-        "title_brightcove_id",
-        "title_content_url",
-        "title_id",
-        "title_vevo_id",
-    ]
-    POSITION_KEYS = [
-        # definitely interesting
-        "rank",
-        # maybe interesting
-        "content_url",
-    ]
-    POSITION_HISTORY_KEYS = [
-        # definitely interesting
-        "peak_date",
-        "peak_rank",
-        # maybe interesting
-        "first_pos_weeks",
-    ]
 
     def __init__(self, session):
         self.session = session
@@ -133,42 +93,65 @@ class Billboard:
         return response.text
 
     def parse_chart(self, html):
-        # This parsing works for hot-100. Haven't checked for other charts yet.
         soup = BeautifulSoup(html, features="html.parser")
-        chart_node = soup.find(id="charts")
-        if not chart_node:
-            return
-        chart = self.parse_chart_metadata(chart_node)
-        position_data = json.loads(chart_node["data-charts"])
-        positions = [self.parse_position(position) for position in position_data]
         return {
-            "chart": chart,
-            "positions": positions,
+            "chart": self.scrape_chart_data(soup),
+            "positions": self.scrape_position_data(soup),
         }
 
-    def parse_chart_metadata(self, chart_node):
+    def scrape_chart_data(self, soup):
+        schemaorg_objects = self.scrape_schemaorg_metadata(soup)
+        chart_data = self.chart_data_from_schemaorg(schemaorg_objects)
+        chart_data["date"] = self.scrape_chart_date(soup)
+        return chart_data
+
+    def scrape_schemaorg_metadata(self, soup):
+        nodes = soup("script", type="application/ld+json")
+        objects = [json.loads(node.text) for node in nodes]
+        return [o for o in objects if o]
+
+    def chart_data_from_schemaorg(self, schemaorg_objects):
+        schemaorg_article = [o for o in schemaorg_objects if o["@type"] == "Article"][0]
+        title = schemaorg_article["headline"]
+        chart_url = schemaorg_article["mainEntityOfPage"]["@id"]
+        _, _, chart_slug = chart_url.rstrip("/").rpartition("/")
         return {
-            strip_prefix(key, "data-chart-"): chart_node.get(key)
-            for key in self.CHART_KEYS
+            "name": schemaorg_article["headline"],
+            "slug": chart_slug,
         }
 
-    def parse_position(self, position_data):
-        artist = {
-            strip_prefix(key, "artist_"): position_data.get(key)
-            for key in self.POSITION_ARTIST_KEYS
-        }
-        song = {
-            strip_prefix(key, "title_"): position_data.get(key)
-            for key in self.POSITION_SONG_KEYS
-        }
-        position = {key: position_data.get(key) for key in self.POSITION_KEYS}
-        history_data = position_data.get("history", {})
-        history = {key: history_data.get(key) for key in self.POSITION_HISTORY_KEYS}
-        position.update(history)
+    def scrape_chart_date(self, soup):
+        picker_node = soup.find(id="chart-date-picker")
+        return picker_node["data-date"]
+
+    def scrape_position_data(self, soup):
+        nodes = soup(class_="o-chart-results-list-row-container")
+        return [self.position_data_from_node(n) for n in nodes]
+
+    def position_data_from_node(self, node):
+        row_node = node.find(class_="o-chart-results-list-row")
+        row_item_nodes = row_node(class_="o-chart-results-list__item")
+
+        rank_node = row_item_nodes[0].span
+        title_node = row_item_nodes[3]
+        previous_rank_node = row_item_nodes[6]
+        peak_rank_node = row_item_nodes[7]
+        chart_weeks_node = row_item_nodes[8]
+
+        try:
+            previous_rank = int(previous_rank_node.text)
+        except ValueError:
+            previous_rank = None
+
         return {
-            "artist": artist,
-            "song": song,
-            "position": position,
+            "artist": {"name": title_node.span.text.strip()},
+            "song": {"title": title_node.h3.text.strip()},
+            "position": {
+                "rank": int(rank_node.text),
+                "peak_rank": int(peak_rank_node.text),
+                "previous_rank": previous_rank,
+                "chart_weeks": int(chart_weeks_node.text),
+            },
         }
 
 
@@ -188,9 +171,21 @@ class Printer:
         self.print(f"{chart['chart']['name']} for {chart['chart']['date']}")
 
     def print_chart_position(self, position, chart_date):
-        peak = "*" if position["position"]["peak_date"] == chart_date else ""
+        rank = position["position"]["rank"]
+        previous_rank = position["position"]["previous_rank"]
+        compare = self.compare_ranks(rank, previous_rank)
+        move = {1: "^   ", 0: " -  ", -1: "  v ", None: "   *"}[compare]
         name = f"{position['song']['title']} - {position['artist']['name']}"
-        print(f"{position['position']['rank']:2d} {peak:1s} {name:50s}")
+        print(f"{position['position']['rank']:2d} {move:4s} {name:50s}")
+
+    def compare_ranks(self, current, previous):
+        if previous is None:
+            return None
+        if current < previous:
+            return 1
+        if current > previous:
+            return -1
+        return 0
 
 
 def load_config():
