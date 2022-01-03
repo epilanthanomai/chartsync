@@ -107,7 +107,7 @@ class Billboard:
 
     def scrape_schemaorg_metadata(self, soup):
         nodes = soup("script", type="application/ld+json")
-        objects = [json.loads(node.text) for node in nodes]
+        objects = [json.loads(node.string) for node in nodes]
         return [o for o in objects if o]
 
     def chart_data_from_schemaorg(self, schemaorg_objects):
